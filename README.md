@@ -1,1 +1,1 @@
-# Modelagem preditiva do desempenho residual de baterias de íons de lítio para reuso em aplicações de baixa demanda
+# Predictive Modeling of Residual Performance of Lithium-Ion Batteries for Reuse in Low-Demand Applications
