@@ -1,0 +1,28 @@
+# === Python Virtual Environments ===
+venv/
+.venv/
+env/
+ENV/
+
+# === Python Cache and Temporary Files ===
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# === Development IDEs ===
+# VS Code
+.vscode/
+
+# PyCharm / JetBrains
+.idea/
+
+# === Environment Variables (Sensitive Data) ===
+.env
+*.env
