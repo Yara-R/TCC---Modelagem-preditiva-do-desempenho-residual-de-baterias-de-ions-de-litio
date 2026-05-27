@@ -67,6 +67,6 @@ if __name__ == "__main__":
     else:
         expected_cols = ["dataset_source", "cell_id", "path", "meta"]
         df = df[expected_cols] 
-        output_file = "master_battery_index.csv"
+        output_file = "battery_index.csv"
         df.to_csv(output_file, index=False)
         print(f"\n✅ Success! Index saved to '{output_file}' with {len(df)} main files.")
