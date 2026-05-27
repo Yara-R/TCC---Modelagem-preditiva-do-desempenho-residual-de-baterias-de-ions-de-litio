@@ -25,9 +25,6 @@ column_mapping:
     - "cap"
     - "ah"
     - "q"
-    - "discharge_capacity"   # <- Comum em resumos da Oxford
-    - "amp_hours"            # <- Comum em dados brutos da Oxford
-    - "q_discharge"
   current:
     - "c_cur"
     - "current_load"

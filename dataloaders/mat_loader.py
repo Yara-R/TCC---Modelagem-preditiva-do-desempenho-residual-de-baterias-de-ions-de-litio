@@ -1,69 +1,326 @@
+"""
+mat_loader.py — Oxford + NASA + genéricos
+Corrige: "setting an array element with a sequence"
+         via squeeze_me=True, struct_as_record=False no scipy.
+"""
+
 import scipy.io
 import pandas as pd
 import numpy as np
+from pathlib import Path
+
+
+# ─────────────────────────────────────────────────────────────────
+# DIAGNÓSTICO — use quando não souber a estrutura real do arquivo
+# ─────────────────────────────────────────────────────────────────
+
+def diagnose(path: str, max_depth: int = 5) -> None:
+    """
+    Imprime a árvore completa de um .mat (v5 ou v7.3/HDF5).
+
+    Uso:
+        from mat_loader import diagnose
+        diagnose("./data/Oxford/Oxford_Battery_Degradation_Dataset_1.mat")
+        diagnose("./data/Oxford/ExampleDC_C1.mat")
+    """
+    path = str(path)
+    print(f"\n{'='*60}\nDIAGNÓSTICO: {Path(path).name}\n{'='*60}")
+
+    # --- tenta scipy (v5) com as opções corretas ---
+    try:
+        mat = scipy.io.loadmat(
+            path,
+            squeeze_me=True,
+            struct_as_record=False,
+            mat_dtype=True,
+        )
+        print("[Formato] MATLAB v5 (scipy)\n")
+        keys = [k for k in mat.keys() if not k.startswith("__")]
+        for k in keys:
+            _diag_scipy(mat[k], name=k, depth=0, max_depth=max_depth)
+        return
+    except NotImplementedError:
+        pass
+    except Exception as e:
+        print(f"[scipy erro] {e}")
+
+    # --- tenta h5py (v7.3) ---
+    try:
+        import h5py
+        print("[Formato] MATLAB v7.3 / HDF5 (h5py)\n")
+        with h5py.File(path, "r") as f:
+            _diag_hdf5(f, depth=0, max_depth=max_depth)
+    except ImportError:
+        print("❌ h5py não instalado:  pip install h5py")
+    except Exception as e:
+        print(f"[h5py erro] {e}")
+
+
+def _diag_scipy(obj, name, depth, max_depth):
+    indent = "  " * depth
+    if depth > max_depth:
+        return
+    if hasattr(obj, "_fieldnames"):                          # mat_struct
+        print(f"{indent}[struct] {name}  campos={obj._fieldnames}")
+        for field in obj._fieldnames:
+            _diag_scipy(getattr(obj, field), field, depth + 1, max_depth)
+    elif isinstance(obj, np.ndarray) and obj.dtype == object:
+        print(f"{indent}[cell/array-obj] {name}  shape={obj.shape}")
+        for i, item in enumerate(obj.flat):
+            if i >= 3:
+                print(f"{indent}  ...")
+                break
+            _diag_scipy(item, f"{name}[{i}]", depth + 1, max_depth)
+    elif isinstance(obj, np.ndarray):
+        print(f"{indent}[array] {name}  shape={obj.shape}  dtype={obj.dtype}")
+    else:
+        print(f"{indent}[?] {name}  type={type(obj).__name__}  val={str(obj)[:60]}")
+
+
+def _diag_hdf5(node, depth, max_depth, name="(root)"):
+    import h5py
+    indent = "  " * depth
+    if depth > max_depth:
+        return
+    if isinstance(node, h5py.Group):
+        print(f"{indent}[group] {name}/  ({len(node)} itens)")
+        for k, v in list(node.items())[:10]:
+            _diag_hdf5(v, depth + 1, max_depth, k)
+        if len(node) > 10:
+            print(f"{indent}  ... (+{len(node)-10} mais)")
+    elif isinstance(node, h5py.Dataset):
+        print(f"{indent}[dataset] {name}  shape={node.shape}  dtype={node.dtype}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# CLASSE PRINCIPAL
+# ─────────────────────────────────────────────────────────────────
 
 class MatLoader:
+    # Opções que corrigem o erro "setting an array element with a sequence"
+    _SCIPY_OPTS = dict(squeeze_me=True, struct_as_record=False, mat_dtype=True)
+
+    _FIELD_RENAME = {
+        "v": "voltage", "q": "capacity", "i": "current",
+        "t": "time",    "T": "temperature",
+    }
+
     def __init__(self, config=None):
         self.config = config
 
-    def _extract_from_mat(self, path):
-        """
-        Carrega arquivos estruturados .mat (comum em datasets como os da NASA)
-        e os converte para um DataFrame legível contendo o histórico de envelhecimento.
-        """
+    # ── ENTRADA PÚBLICA ──────────────────────────────────────────
+
+    def _extract_from_mat(self, path: str) -> pd.DataFrame:
+        path = str(path)
         try:
-            mat = scipy.io.loadmat(path)
-            
-            # Localiza a chave primária de dados (ex: 'B0005' no caso da NASA)
-            key = [k for k in mat.keys() if not k.startswith('__')][0]
-            struct = mat[key]
-            
-            # Verifica se possui a árvore de dados estruturada por ciclos
-            if 'cycle' in struct.dtype.names:
-                cycles = struct[0, 0]['cycle'][0]
-                
-                capacities = []
-                voltages = []
-                currents = []
-                times = []
-                
-                for c in cycles:
-                    # Filtra ciclos de descarga para acompanhar a perda de capacidade
-                    if c['type'][0] == 'discharge':
-                        data = c['data'][0, 0]
-                        
-                        # Extrai a capacidade medida do ciclo
-                        cap_val = data['Capacity'][0, 0] if 'Capacity' in data.dtype.names else np.nan
-                        capacities.append(float(cap_val))
-                        
-                        # Captura dados agregados de tensão, corrente e tempo para o ciclo
-                        v_meas = data['Voltage_measured'][0] if 'Voltage_measured' in data.dtype.names else [4.2]
-                        i_meas = data['Current_measured'][0] if 'Current_measured' in data.dtype.names else [1.0]
-                        t_meas = data['Time'][0] if 'Time' in data.dtype.names else [0.0]
-                        
-                        voltages.append(float(np.max(v_meas)))
-                        currents.append(float(np.mean(np.abs(i_meas))))
-                        times.append(float(np.max(t_meas)))
-                
-                # Retorna o DataFrame sumarizado por ciclo para o treinamento do cérebro de IA
-                df = pd.DataFrame({
-                    'voltage': voltages,
-                    'capacity': capacities,
-                    'current': currents,
-                    'time': times
-                })
-                return df
-                
-            else:
-                # Estrutura de contingência simples para arquivos .mat planos
-                data_dict = {}
-                for k in mat.keys():
-                    if not k.startswith('__'):
-                        arr = np.array(mat[k]).flatten()
-                        if len(arr) > 0:
-                            data_dict[k] = arr
-                return pd.DataFrame.from_dict(data_dict, orient='index').transpose()
-                
+            mat = scipy.io.loadmat(path, **self._SCIPY_OPTS)
+            return self._dispatch_scipy(mat, Path(path).name.lower())
+        except NotImplementedError:
+            return self._load_hdf5(path)
         except Exception as e:
-            print(f"❌ Erro ao processar o arquivo binário .mat {path}: {e}")
+            print(f"❌ Erro ao abrir {path}: {e}")
             return pd.DataFrame()
+
+    # ── ROTEADOR scipy ───────────────────────────────────────────
+
+    def _dispatch_scipy(self, mat: dict, filename: str) -> pd.DataFrame:
+        keys = [k for k in mat.keys() if not k.startswith("__")]
+        if not keys:
+            return pd.DataFrame()
+
+        # NASA: struct com campo 'cycle'
+        for k in keys:
+            obj = mat[k]
+            if hasattr(obj, "_fieldnames") and "cycle" in obj._fieldnames:
+                return self._parse_nasa(obj)
+
+        # Oxford ExampleDC: struct com campos 'ch' e/ou 'dc'
+        for k in keys:
+            obj = mat[k]
+            if hasattr(obj, "_fieldnames"):
+                fl = [f.lower() for f in obj._fieldnames]
+                if "dc" in fl or "ch" in fl:
+                    return self._parse_oxford_exampledc(obj)
+
+        # Fallback: tenta ler arrays de topo diretamente
+        return self._parse_flat_arrays(mat, keys)
+
+    # ── NASA ─────────────────────────────────────────────────────
+
+    def _parse_nasa(self, struct) -> pd.DataFrame:
+        cycles = np.atleast_1d(struct.cycle)
+        rows = []
+        for c in cycles:
+            if not hasattr(c, "type") or str(c.type).strip() != "discharge":
+                continue
+            d = c.data
+            cap = float(np.atleast_1d(d.Capacity).flat[0])  if hasattr(d, "Capacity")          else np.nan
+            v   = float(np.max(np.atleast_1d(d.Voltage_measured)))  if hasattr(d, "Voltage_measured")  else np.nan
+            i   = float(np.mean(np.abs(np.atleast_1d(d.Current_measured)))) if hasattr(d, "Current_measured") else np.nan
+            t   = float(np.max(np.atleast_1d(d.Time)))      if hasattr(d, "Time")              else np.nan
+            rows.append({"voltage": v, "capacity": cap, "current": i, "time": t})
+        return pd.DataFrame(rows)
+
+    # ── OXFORD ExampleDC_C1.mat ──────────────────────────────────
+    # Estrutura: mat_struct com campos 'ch' e 'dc',
+    # cada um com subcampos t, v, q, T (e 'i' no dc)
+
+    def _parse_oxford_exampledc(self, top_struct) -> pd.DataFrame:
+        # Pega o canal de descarga ('dc'), ou 'ch' se não tiver
+        target = None
+        for fname in top_struct._fieldnames:
+            if fname.lower() == "dc":
+                target = getattr(top_struct, fname)
+                break
+        if target is None:
+            target = getattr(top_struct, top_struct._fieldnames[0])
+
+        return self._mat_struct_to_df(target)
+
+    def _mat_struct_to_df(self, struct) -> pd.DataFrame:
+        """Converte mat_struct com campos t/v/q/T/i em DataFrame."""
+        if not hasattr(struct, "_fieldnames"):
+            return pd.DataFrame()
+
+        data = {}
+        for field in struct._fieldnames:
+            arr = np.atleast_1d(getattr(struct, field)).flatten()
+            try:
+                arr = arr.astype(float)
+            except (ValueError, TypeError):
+                continue
+            if len(arr) > 1:
+                col = self._FIELD_RENAME.get(field, field.lower())
+                data[col] = arr
+
+        return self._align(data)
+
+    # ── FALLBACK: arrays planos no topo ──────────────────────────
+
+    def _parse_flat_arrays(self, mat: dict, keys: list) -> pd.DataFrame:
+        data = {}
+        for k in keys:
+            arr = np.atleast_1d(mat[k]).flatten()
+            try:
+                arr = arr.astype(float)
+            except (ValueError, TypeError):
+                continue
+            if len(arr) > 1:
+                col = self._FIELD_RENAME.get(k, k.lower())
+                data[col] = arr
+        return self._align(data)
+
+    # ── OXFORD PRINCIPAL — HDF5 (v7.3, 262 MB) ──────────────────
+    # Estrutura: /Cell1/cyc0100/C1dc/{t,v,q,T}
+
+    def _load_hdf5(self, path: str) -> pd.DataFrame:
+        try:
+            import h5py
+        except ImportError:
+            print("❌ h5py não instalado:  pip install h5py")
+            return pd.DataFrame()
+
+        rows = []
+        try:
+            with h5py.File(path, "r") as f:
+                cell_keys = self._hdf5_cell_keys(f)
+                if not cell_keys:
+                    print("⚠️  Nenhuma chave de célula encontrada. "
+                          "Use diagnose() para ver a estrutura real.")
+                    return pd.DataFrame()
+
+                for cell_name in sorted(cell_keys):
+                    cell_grp = f[cell_name]
+                    for cyc_name in sorted(cell_grp.keys()):
+                        cyc_grp = cell_grp[cyc_name]
+                        dc_key  = self._pick_dc_key(cyc_grp)
+                        if dc_key is None:
+                            continue
+
+                        dc    = cyc_grp[dc_key]
+                        q_arr = self._hdf5_read(f, dc, "q")
+                        v_arr = self._hdf5_read(f, dc, "v")
+                        t_arr = self._hdf5_read(f, dc, "t")
+                        T_arr = self._hdf5_read(f, dc, "T")
+
+                        if q_arr is None or len(q_arr) == 0:
+                            continue
+
+                        capacity = float(np.abs(q_arr[-1]) or np.max(np.abs(q_arr)))
+                        rows.append({
+                            "cell_id":     cell_name,
+                            "cycle":       self._cycle_num(cyc_name),
+                            "capacity":    capacity,
+                            "voltage":     float(np.mean(v_arr)) if v_arr is not None else np.nan,
+                            "time":        float(t_arr[-1])      if t_arr is not None else np.nan,
+                            "temperature": float(np.mean(T_arr)) if T_arr is not None else np.nan,
+                        })
+
+        except Exception as e:
+            print(f"❌ Erro HDF5 em {path}: {e}")
+            import traceback; traceback.print_exc()
+            return pd.DataFrame()
+
+        if not rows:
+            print("⚠️  Sem dados de descarga. Use diagnose() para verificar nomes dos grupos.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows).sort_values(["cell_id", "cycle"]).reset_index(drop=True)
+        print(f"✅ Oxford HDF5: {len(df)} ciclos em {df['cell_id'].nunique()} células.")
+        return df
+
+    # ── helpers HDF5 ─────────────────────────────────────────────
+
+    @staticmethod
+    def _hdf5_cell_keys(f) -> list:
+        import h5py
+        out = [k for k in f.keys()
+               if k.lower().startswith("cell") or
+               (len(k) <= 3 and k.lower().startswith("c") and k[1:].isdigit())]
+        return out or [k for k in f.keys() if isinstance(f[k], h5py.Group)]
+
+    @staticmethod
+    def _pick_dc_key(grp) -> str | None:
+        for c in ("C1dc", "c1dc", "OCVdc", "ocvdc"):
+            if c in grp: return c
+        for k in grp.keys():
+            if "dc" in k.lower(): return k
+        return None
+
+    @staticmethod
+    def _hdf5_read(f, grp, field: str):
+        import h5py
+        if field not in grp:
+            return None
+        try:
+            raw = grp[field]
+            if isinstance(raw, h5py.Dataset):
+                if h5py.check_ref_dtype(raw.dtype) or raw.dtype == object:
+                    return np.array([f[r][()] for r in raw.flat]).flatten().astype(float)
+                return np.array(raw).flatten().astype(float)
+        except Exception as e:
+            print(f"  ⚠️  Campo '{field}': {e}")
+        return None
+
+    @staticmethod
+    def _cycle_num(name: str) -> int:
+        d = "".join(c for c in name if c.isdigit())
+        return int(d) if d else -1
+
+    # ── alinhamento de vetores ───────────────────────────────────
+
+    @staticmethod
+    def _align(data: dict) -> pd.DataFrame:
+        if not data:
+            return pd.DataFrame()
+        lengths = [len(v) for v in data.values()]
+        ideal   = max(set(lengths), key=lengths.count)
+        out = {}
+        for col, vec in data.items():
+            if len(vec) == ideal:
+                out[col] = vec
+            elif len(vec) > ideal:
+                out[col] = vec[:ideal]
+            else:
+                out[col] = np.pad(vec, (0, ideal - len(vec)), "edge")
+        return pd.DataFrame(out)

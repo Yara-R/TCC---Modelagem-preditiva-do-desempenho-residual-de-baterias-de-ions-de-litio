@@ -110,8 +110,8 @@ def get_column_data(df, target_type):
 # 2. THE AI BRAIN 
 # ============================================
 @st.cache_resource(show_spinner="🧠 Treinando Modelo nas 6 Fontes...")
-def train_ai_brain_v15():
-    BRAIN_FILE = "moe_brain_v15_final_prod.pkl"
+def train_ai_brain():
+    BRAIN_FILE = "moe_brain.pkl"
     features = ['soh', 'resistance', 'nominal_capacity', 'max_voltage', 'soh_diff']
     
     if os.path.exists(BRAIN_FILE):
@@ -211,7 +211,7 @@ def train_ai_brain_v15():
     r2_full = r2_score(X_all['rul_frac'], full_model.predict(X_all[features]))
     
     ablation_metrics = {
-        "V15 (All)": r2_full, 
+        "All": r2_full, 
         "SOH Only": r2_score(X_all['rul_frac'], xgb.XGBRegressor(**xgb_params).fit(X_all[['soh']], X_all['rul_frac']).predict(X_all[['soh']])), 
         "Res Only": r2_score(X_all['rul_frac'], xgb.XGBRegressor(**xgb_params).fit(X_all[['resistance']], X_all['rul_frac']).predict(X_all[['resistance']]))
     }
@@ -239,7 +239,7 @@ def train_ai_brain_v15():
     joblib.dump(result, BRAIN_FILE)
     return result
 
-df_ref, modelos_moe, feature_names, lodo_metrics, loco_metrics, temporal_metrics, ablation_metrics, y_test_set, y_pred_set, r2_full = train_ai_brain_v15()
+df_ref, modelos_moe, feature_names, lodo_metrics, loco_metrics, temporal_metrics, ablation_metrics, y_test_set, y_pred_set, r2_full = train_ai_brain()
 
 # ============================================
 # 3. SIDEBAR (Inputs Físicos)
@@ -340,7 +340,7 @@ pred_rul_final = max(0, min(1, expert_ativo.predict(input_df)[0])) * multiplier
 # ============================================
 st.title(f"🔋 Analytics: {cell_id}")
 
-tab_main, tab_reliability = st.tabs(["🔬 Advanced Diagnostics (MoE V15)", "🛡️ Model Reliability"])
+tab_main, tab_reliability = st.tabs(["🔬 Advanced Diagnostics (MoE)", "🛡️ Model Reliability"])
 
 with tab_main:
     st.markdown("### Electrochemical Health & Analysis")
