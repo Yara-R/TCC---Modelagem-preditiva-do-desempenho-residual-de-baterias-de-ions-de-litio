@@ -1,0 +1,43 @@
+data_paths:
+  everlasting: "./data/everlasting"
+  evtol: "./data/eVTOL"
+  forklift: "./data/Forklift"
+  multistage: "./data/Multi-Stage"
+  nasa: "./data/NASA"
+  oxford: "./data/Oxford"
+
+column_mapping:
+  voltage:
+    - "v_measured"
+    - "voltage_load"
+    - "ecell_v"
+    - "voltage"
+    - "volt"
+    - "v"
+    - "tension"
+    - "tensao"
+  capacity:
+    - "discharge"
+    - "q_measured"
+    - "throughput"
+    - "capacity"
+    - "qdischarge"
+    - "cap"
+    - "ah"
+    - "q"
+    - "discharge_capacity"   # <- Comum em resumos da Oxford
+    - "amp_hours"            # <- Comum em dados brutos da Oxford
+    - "q_discharge"
+  current:
+    - "c_cur"
+    - "current_load"
+    - "i_meas"
+    - "current"
+    - "amp"
+    - "corrente"
+    - "i"
+  time:
+    - "run_time"
+    - "time_s"
+    - "time"
+    - "t"

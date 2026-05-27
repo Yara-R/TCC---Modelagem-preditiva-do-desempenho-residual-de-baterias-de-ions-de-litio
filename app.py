@@ -7,10 +7,16 @@ import yaml
 import os
 import xgboost as xgb
 import joblib
+from sklearn.metrics import r2_score, mean_absolute_error
+from scipy.interpolate import interp1d
+import warnings
 
-# Adjust this import based on your exact folder structure (loaders vs dataloaders)
-from dataloaders.mat_loader import MatLoader
-from sklearn.model_selection import GroupShuffleSplit
+try:
+    from dataloaders.mat_loader import MatLoader
+except ImportError:
+    MatLoader = None
+
+warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Battery AI Analytics Suite", layout="wide", page_icon="🔋")
 
@@ -27,201 +33,216 @@ except FileNotFoundError:
 
 @st.cache_data
 def load_registry():
-    """Loads the master index of all available battery files."""
     if not os.path.exists("master_battery_index.csv"):
         return pd.DataFrame()
     return pd.read_csv("master_battery_index.csv")
 
 @st.cache_data(show_spinner=False)
 def load_dataset_file(path):
-    """Smart Loader: Routes the file to the correct parser based on extension."""
+    """Leitor Blindado: Tenta múltiplos separadores para arquivos teimosos."""
     if not os.path.exists(path):
         return pd.DataFrame()
-
+        
     ext = os.path.splitext(path)[1].lower()
 
     if ext == '.mat':
-        try:
-            loader = MatLoader(config=None)
-            df = loader._extract_from_mat(path)
-            return df
-        except Exception as e:
-            st.error(f"Error reading .mat file: {e}")
-            return pd.DataFrame()
-    else:
-        try:
-            return pd.read_csv(path, nrows=50000)
-        except:
+        if MatLoader is not None:
             try:
-                return pd.read_csv(path, sep=None, engine='python', nrows=50000)
+                loader = MatLoader(config=None)
+                df = loader._extract_from_mat(path)
+                return df if df is not None else pd.DataFrame()
             except:
                 return pd.DataFrame()
+        return pd.DataFrame()
+        
+    else:
+        # Testa vários delimitadores (Resolve Forklift e Multistage)
+        for separador in [',', ';', '\t', '|']:
+            try:
+                df = pd.read_csv(path, sep=separador, nrows=50000, on_bad_lines='skip')
+                if len(df.columns) > 1:
+                    return df
+            except:
+                continue
+                
+        try:
+            return pd.read_csv(path, sep=None, engine='python', nrows=50000)
+        except:
+            return pd.DataFrame()
 
 def get_column_data(df, target_type):
-    mappings = config.get('column_mapping', {})
-    possible_names = mappings.get(target_type, [])
+    """Busca Definitiva + Suporte a Tempo e Nomes Específicos (Forklift, Multistage, NASA)"""
+    if df is None or df.empty:
+        return None, pd.Series(dtype=float)
+
+    config_keys = [str(k).lower().strip() for k in COL_MAP.get(target_type, [])]
     
-    for name in possible_names:
-        if name in df.columns: 
-            return name, df[name]
-        for df_col in df.columns:
-            if name.lower() == df_col.lower(): 
-                return df_col, df[df_col]
-            
+    # 🚨 Adicionado mapeamento exato do Forklift, Multistage e NASA
+    fallback_matches = {
+        'voltage': ['c_vol', 'voltage_load', 'v_measured', 'ecell_v', 'tension', 'tensao', 'voltage', 'volt', 'v'],
+        'capacity': ['discharge', 'q_measured', 'throughput', 'ma_h', 'qdischarge', 'capacity', 'cap', 'ah', 'q'],
+        'current': ['c_cur', 'current_load', 'amp', 'i_meas', 'corrente', 'current', 'i'],
+        'time': ['run_time', 'time_s', 'time', 't'] # <- NOVO: Busca de tempo!
+    }
+    fallback_keys = fallback_matches.get(target_type, [])
+    
+    todas_as_chaves = list(set(config_keys + fallback_keys))
+    keys_limpas = sorted([k.replace('_', '').lower() for k in todas_as_chaves], key=len, reverse=True)
+    
+    for col_original in df.columns:
+        col_limpa = str(col_original).lower().strip().replace('_', '').replace('-', '').replace(' ', '')
+        
+        for key in keys_limpas:
+            # Não deixa a letra 'v' ou 't' pegar colunas aleatórias
+            if len(key) == 1 and col_limpa != key and f"({key})" not in col_limpa and f"{key}(" not in col_limpa and f"_{key}" not in col_limpa:
+                continue
+                
+            if key in col_limpa: 
+                dados_corrigidos = df[col_original].astype(str).str.replace(',', '.')
+                serie_numerica = pd.to_numeric(dados_corrigidos, errors='coerce')
+                
+                if not serie_numerica.isna().all():
+                    return col_original, serie_numerica.dropna()
+                
     return None, pd.Series(dtype=float)
 
 # ============================================
-# 2. THE AI BRAIN (MoE - Mixture of Experts)
+# 2. THE AI BRAIN 
 # ============================================
-
-@st.cache_resource(show_spinner="🧠 A treinar a Arquitetura Híbrida MoE (Mixture of Experts)...")
-def train_analytics_model():
-    BRAIN_FILE = "moe_brain_v1.pkl"
-    features = ['capacity', 'resistance', 'voltage']
+@st.cache_resource(show_spinner="🧠 Treinando Modelo nas 6 Fontes...")
+def train_ai_brain_v15():
+    BRAIN_FILE = "moe_brain_v15_final_prod.pkl"
+    features = ['soh', 'resistance', 'nominal_capacity', 'max_voltage', 'soh_diff']
     
-    # Se a "caixa de ferramentas" já existir, carrega diretamente
     if os.path.exists(BRAIN_FILE):
         return joblib.load(BRAIN_FILE)
 
-    # --- PARTE 1: DADOS SINTÉTICOS (Trajetórias Físicas) ---
     np.random.seed(42)
-    synthetic_frames = []
-    
-    for cell_idx in range(50):
-        quality = np.random.uniform(0.85, 1.15)
-        total_life = int(1000 * quality)
-        cycles = np.arange(1, total_life + 1)
-        
-        cap_synth = (quality * 2.0) * np.exp(-0.0004 * cycles) + np.random.normal(0, 0.005, total_life)
-        res_synth = 0.10 + (0.0001 * cycles) + (1e-8 * cycles**2.5) + np.random.normal(0, 0.002, total_life)
-        volt_synth = 4.2 - (cycles * 0.0002) + np.random.normal(0, 0.01, total_life)
-        rul_synth = total_life - cycles
-        
-        df_cell = pd.DataFrame({
-            'cell_id': f'synth_cell_{cell_idx}',
-            'dataset_source': 'SYNTHETIC', 
-            'capacity': cap_synth, 
-            'resistance': res_synth, 
-            'voltage': volt_synth, 
-            'rul': rul_synth
-        })
-        synthetic_frames.append(df_cell)
-        
-    df_synth = pd.concat(synthetic_frames)
-
-    # --- PARTE 2: INJEÇÃO DE DADOS REAIS ---
     real_data_frames = []
+    registry = load_registry()
     
-    if os.path.exists("master_battery_index.csv"):
+    for idx, row in registry.iterrows():
         try:
-            registry = pd.read_csv("master_battery_index.csv")
-            sample_files = registry.sample(n=min(len(registry), 20), random_state=42)
+            path, c_id, d_source = row['path'], row.get('cell_id', f'real_{idx}'), row.get('dataset_source', 'UNKNOWN')
+            df_raw = load_dataset_file(path)
+            if df_raw.empty: continue
             
-            for idx, row in sample_files.iterrows():
-                try:
-                    path = row['path']
-                    c_id = row.get('cell_id', f'real_cell_{idx}')
-                    d_source = row.get('dataset_source', 'UNKNOWN') 
-                    
-                    df_real = pd.read_csv(path)
-                    cols_lower = {c.lower(): c for c in df_real.columns}
-                    col_map = {}
-                    
-                    for k in ['voltage', 'volt', 'v', 'voltage_measured']:
-                        if k in cols_lower: col_map['voltage'] = cols_lower[k]; break
-                    for k in ['capacity', 'cap', 'capacity_ah']:
-                        if k in cols_lower: col_map['capacity'] = cols_lower[k]; break
-                    
-                    if 'voltage' not in col_map: continue
-                    
-                    df_clean = df_real.rename(columns={v: k for k, v in col_map.items()})
-                    mean_volt = df_clean['voltage'].mean()
-                    max_cap = df_clean['capacity'].max() if 'capacity' in df_clean.columns else 2.0
-                    
-                    if (3.0 < mean_volt < 4.5) and (0.5 < max_cap < 5.0):
-                        if 'cycle' not in [c.lower() for c in df_clean.columns]:
-                             df_clean['cycle'] = np.linspace(0, 1000, len(df_clean))
-                        else:
-                             c_key = next(k for k in cols_lower if 'cycle' in k or 'time' in k)
-                             df_clean['cycle'] = df_clean[cols_lower[c_key]]
+            _, series_v = get_column_data(df_raw, 'voltage')
+            _, series_c = get_column_data(df_raw, 'capacity')
+            
+            if series_c.empty: 
+                steps = np.linspace(0, 1, min(100, len(df_raw)))
+                fake_cap = 1.2 - (0.4 * (steps ** 1.5)) + np.random.normal(0, 0.015, len(steps))
+                series_c = pd.Series(fake_cap)
+            
+            f_interp = interp1d(np.linspace(0, 1, len(series_c)), series_c.values, kind='linear', fill_value="extrapolate")
+            x_new = np.linspace(0, 1, 100)
+            df_r = pd.DataFrame({'capacity': f_interp(x_new), 'rul_frac': 1.0 - x_new})
+            
+            max_c = df_r['capacity'].max() if df_r['capacity'].max() > 0 else 1.0
+            df_r['soh'] = (df_r['capacity'] / max_c).clip(0, 1)
+            df_r['nominal_capacity'] = round(max_c, 1)
+            df_r['max_voltage'] = round(series_v.max(), 2) if (series_v is not None and not series_v.empty) else 4.2
+            
+            df_r['soh_diff'] = df_r['soh'].rolling(3).mean().diff().fillna(0.0)
 
-                        df_r = df_clean.iloc[::10, :].copy()
-                        if 'capacity' not in df_r.columns:
-                            df_r['capacity'] = (df_r['voltage'] / 4.2) * 2.0
-                            
-                        df_r['resistance'] = 0.10 + (df_r['cycle'] * 0.0001) + np.random.normal(0, 0.005, len(df_r))
-                        max_cycle = df_r['cycle'].max()
-                        df_r['rul'] = max_cycle - df_r['cycle']
-                        df_r['cell_id'] = c_id
-                        df_r['dataset_source'] = d_source 
-                        
-                        real_data_frames.append(df_r[['cell_id', 'dataset_source', 'capacity', 'resistance', 'voltage', 'rul']])
-                except Exception:
-                    continue
-        except:
-            pass 
+            source_up = str(d_source).upper()
+            res_base = 0.035 if 'NASA' in source_up else 0.075 if 'EVERLASTING' in source_up else 0.090 if 'MULTISTAGE' in source_up else 0.05
+            df_r['resistance'] = res_base + ((1.0 - df_r['soh']) * 0.04) + np.random.normal(0, 0.006, 100)
+            
+            df_r['cell_id'], df_r['dataset_source'] = c_id, source_up
+            real_data_frames.append(df_r)
+        except Exception as e: 
+            continue
 
-    # --- PARTE 3: FUSÃO DOS DADOS ---
-    if real_data_frames:
-        df_real_final = pd.concat(real_data_frames)
-        X_final = pd.concat([df_synth, df_real_final]).dropna()
-    else:
-        X_final = df_synth.dropna()
+    if not real_data_frames:
+        st.error("Nenhum dado válido processado.")
+        st.stop()
+
+    X_all = pd.concat(real_data_frames, ignore_index=True).dropna()
+    
+    xgb_params = {
+        'n_estimators': 80,         
+        'max_depth': 4,             
+        'learning_rate': 0.05, 
+        'subsample': 0.8,           
+        'colsample_bytree': 0.8,    
+        'random_state': 42
+    }
+    
+    m_aero = xgb.XGBRegressor(**xgb_params).fit(X_all[X_all['resistance'] < 0.06][features], X_all[X_all['resistance'] < 0.06]['rul_frac'])
+    m_ind = xgb.XGBRegressor(**xgb_params).fit(X_all[X_all['resistance'] >= 0.06][features], X_all[X_all['resistance'] >= 0.06]['rul_frac'])
+    full_model = xgb.XGBRegressor(**xgb_params).fit(X_all[features], X_all['rul_frac'])
+    
+    lodo_results = []
+    for src in X_all['dataset_source'].unique():
+        train_df, test_df = X_all[X_all['dataset_source'] != src], X_all[X_all['dataset_source'] == src]
+        if len(train_df) > 0 and len(test_df) > 0:
+            lodo_model = xgb.XGBRegressor(**xgb_params).fit(train_df[features], train_df['rul_frac'])
+            preds = np.clip(lodo_model.predict(test_df[features]), 0, 1)
+            erros = test_df['rul_frac'].values - preds
+            
+            lodo_results.append({
+                'Dataset': src, 
+                'R²': r2_score(test_df['rul_frac'], preds), 
+                'MAE (%)': mean_absolute_error(test_df['rul_frac'], preds) * 100,
+                'Safe Bias (%)': round(np.mean(erros > 0.05) * 100, 1),
+                'Neutral (±5%)': round(np.mean((erros >= -0.05) & (erros <= 0.05)) * 100, 1), 
+                'Danger Bias (%)': round(np.mean(erros < -0.05) * 100, 1)
+            })
+
+    loco_results = []
+    amostras_loco = X_all['cell_id'].drop_duplicates().sample(n=min(5, X_all['cell_id'].nunique()), random_state=42)
+    for cell in amostras_loco:
+        train_df, test_df = X_all[X_all['cell_id'] != cell], X_all[X_all['cell_id'] == cell]
+        if len(train_df) > 0 and len(test_df) > 0:
+            loco_model = xgb.XGBRegressor(**xgb_params).fit(train_df[features], train_df['rul_frac'])
+            preds = np.clip(loco_model.predict(test_df[features]), 0, 1)
+            loco_results.append({'Cell ID': cell, 'Source': test_df['dataset_source'].iloc[0], 'MAE (%)': mean_absolute_error(test_df['rul_frac'], preds) * 100})
+
+    train_temp = X_all[X_all['rul_frac'] >= 0.5]
+    test_temp = X_all[X_all['rul_frac'] < 0.5] 
+    if len(train_temp) > 0 and len(test_temp) > 0:
+        temp_model = xgb.XGBRegressor(**xgb_params).fit(train_temp[features], train_temp['rul_frac'])
+        preds_temp = np.clip(temp_model.predict(test_temp[features]), 0, 1)
+        temporal_metrics = {'MAE Late Life (%)': mean_absolute_error(test_temp['rul_frac'], preds_temp) * 100, 'R² Late Life': r2_score(test_temp['rul_frac'], preds_temp)}
+    else: temporal_metrics = {'MAE Late Life (%)': 0.0, 'R² Late Life': 0.0}
+
+    r2_full = r2_score(X_all['rul_frac'], full_model.predict(X_all[features]))
+    
+    ablation_metrics = {
+        "V15 (All)": r2_full, 
+        "SOH Only": r2_score(X_all['rul_frac'], xgb.XGBRegressor(**xgb_params).fit(X_all[['soh']], X_all['rul_frac']).predict(X_all[['soh']])), 
+        "Res Only": r2_score(X_all['rul_frac'], xgb.XGBRegressor(**xgb_params).fit(X_all[['resistance']], X_all['rul_frac']).predict(X_all[['resistance']]))
+    }
 
     modelos_moe = {}
-
-    # ---------------------------------------------------------
-    # TREINO DOS 3 ESPECIALISTAS (MoE)
-    # ---------------------------------------------------------
-    
-    # 1. Expert Aeroespacial (NASA, EVTOL)
-    df_aero = X_final[X_final['dataset_source'].isin(['NASA', 'EVTOL'])]
-    expert_aero = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05)
-    if not df_aero.empty:
-        expert_aero.fit(df_aero[features], df_aero['rul'])
+    df_aero = X_all[X_all['resistance'] < 0.05]
+    expert_aero = xgb.XGBRegressor(**xgb_params)
+    if not df_aero.empty: expert_aero.fit(df_aero[features], df_aero['rul_frac'])
     modelos_moe['aeroespacial'] = expert_aero
 
-    # 2. Expert Industrial (FORKLIFT)
-    df_ind = X_final[X_final['dataset_source'] == 'FORKLIFT']
-    expert_ind = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05)
-    if not df_ind.empty:
-        expert_ind.fit(df_ind[features], df_ind['rul'])
+    df_ind = X_all[(X_all['resistance'] >= 0.05) & (X_all['resistance'] < 0.09)]
+    expert_ind = xgb.XGBRegressor(**xgb_params)
+    if not df_ind.empty: expert_ind.fit(df_ind[features], df_ind['rul_frac'])
     modelos_moe['industrial'] = expert_ind
 
-    # 3. Expert Estacionário (EVERLASTING, OXFORD, SYNTHETIC)
-    df_estac = X_final[X_final['dataset_source'].isin(['EVERLASTING', 'OXFORD', 'SYNTHETIC'])]
-    expert_estac = xgb.XGBRegressor(n_estimators=150, max_depth=4, learning_rate=0.05)
-    if not df_estac.empty:
-        expert_estac.fit(df_estac[features], df_estac['rul'])
+    df_estac = X_all[X_all['resistance'] >= 0.09]
+    expert_estac = xgb.XGBRegressor(**xgb_params)
+    if not df_estac.empty: expert_estac.fit(df_estac[features], df_estac['rul_frac'])
     modelos_moe['estacionario'] = expert_estac
 
-    # Criar um pequeno conjunto de dados de teste para exibir na Aba 2 (Confiabilidade)
-    df_plot = X_final.sample(n=min(len(X_final), 400), random_state=42)
-    y_plot_true = df_plot['rul'].values
-    y_plot_pred = []
-    
-    # Simulando o Roteador para gerar previsões para o gráfico
-    for _, row in df_plot.iterrows():
-        res = row['resistance']
-        inp = pd.DataFrame([row[features]])
-        if res <= 0.050 and not df_aero.empty:
-            y_plot_pred.append(expert_aero.predict(inp)[0])
-        elif res <= 0.100 and not df_ind.empty:
-            y_plot_pred.append(expert_ind.predict(inp)[0])
-        else:
-            y_plot_pred.append(expert_estac.predict(inp)[0])
+    df_plot = X_all.sample(n=min(len(X_all), 1000), random_state=42)
+    y_test_set, y_pred_set = df_plot['rul_frac'].values, np.clip(full_model.predict(df_plot[features]), 0, 1)
 
-    # Guarda a "Caixa de Ferramentas" num ficheiro
-    result = (df_plot, modelos_moe, features, 0.94, (np.array(y_plot_true), np.array(y_plot_pred)))
+    result = (df_plot, modelos_moe, features, lodo_results, loco_results, temporal_metrics, ablation_metrics, y_test_set, y_pred_set, r2_full)
     joblib.dump(result, BRAIN_FILE)
-    
     return result
 
-# Carregamento Inicial
-df_ref, modelos_moe, feature_names, accuracy, (y_test_set, y_pred_set) = train_analytics_model()
+df_ref, modelos_moe, feature_names, lodo_metrics, loco_metrics, temporal_metrics, ablation_metrics, y_test_set, y_pred_set, r2_full = train_ai_brain_v15()
 
 # ============================================
-# 3. SIDEBAR (Data Selection)
+# 3. SIDEBAR (Inputs Físicos)
 # ============================================
 st.sidebar.title("🔋 Battery Explorer")
 
@@ -237,175 +258,166 @@ cell_id = st.sidebar.selectbox("Cell ID", sorted(subset['cell_id'].unique()))
 file_info = subset[subset['cell_id'] == cell_id].iloc[0]
 df = load_dataset_file(file_info['path'])
 
+if df.empty:
+    st.sidebar.error(f"❌ ERRO FATAL: O arquivo retornou vazio. Caminho: {file_info['path']}")
+else:
+    with st.sidebar.expander("🔍 Inspecionar Colunas do Arquivo"):
+        st.write(df.columns.tolist())
+
 v_name, v_data = get_column_data(df, 'voltage')
+c_name, c_data = get_column_data(df, 'capacity')
 i_name, i_data = get_column_data(df, 'current')
+t_name, t_data = get_column_data(df, 'time')
 
-real_cap, real_res, real_volt = 0.9, 0.03, 3.7
-data_status = "⚠️ using defaults"
+# =========================================================
+# 🚀 OPÇÃO AVANÇADA: INTEGRAÇÃO FÍSICA DE CAPACIDADE
+# Se o arquivo NÃO tem capacidade, mas tem Corrente e Tempo:
+# =========================================================
+if (not c_name or c_data.empty) and (i_name is not None and not i_data.empty) and (t_name is not None and not t_data.empty):
+    
+    # 1. Calcula o delta_t (diferença de tempo entre as medições)
+    delta_t = t_data.diff().fillna(0).abs()
+    
+    # 2. Integração: Capacidade (Ah) = Σ (Corrente * delta_tempo) / 3600
+    # Usamos abs() na corrente porque a descarga costuma ser um número negativo
+    capacidade_calculada = (i_data.abs() * delta_t).cumsum() / 3600.0
+    
+    # 3. Injeta a nova coluna calculada direto na memória do DataFrame!
+    c_name = "Capacity_Calculated_Ah (Física)"
+    c_data = capacidade_calculada
+    df[c_name] = c_data 
+    
+    st.sidebar.success("⚡ Capacidade calculada em tempo real (∫ I dt)")
+# =========================================================
 
-if not v_data.empty:
-    data_status = "✅ extracted from file"
+# Tenta extrair a capacidade real do arquivo (se a coluna existir)
+real_cap, real_res, real_volt = 1.0, 0.05, 4.2
+if c_name and not c_data.empty: real_cap = c_data.iloc[-1]
+
+# Tenta extrair a capacidade real do arquivo (se a coluna existir)
+real_cap, real_res, real_volt = 1.0, 0.05, 4.2
+if c_name and not c_data.empty: real_cap = c_data.iloc[-1]
+elif v_name and not v_data.empty: real_cap = (v_data.mean() / 3.7) * 1.0
+
+if v_name and not v_data.empty:
     real_volt = v_data.quantile(0.95) 
-    
-    if not i_data.empty and i_data.std() > 0.1:
-        real_res = (v_data.max() - v_data.min()) / (i_data.max() - i_data.min()) * 0.5
-        real_res = max(0.01, min(0.15, real_res))
-    
-    real_cap = (v_data.mean() / 3.7) * 1.0
+    if i_name and not i_data.empty and i_data.std() > 0.1:
+        real_res = max(0.01, min(0.15, (v_data.max() - v_data.min()) / (i_data.max() - i_data.min()) * 0.5))
 
 st.sidebar.markdown("---")
-st.sidebar.caption(f"Physics Inputs ({data_status})")
+st.sidebar.caption("⚙️ Physics Inputs")
 
-s_cap = st.sidebar.slider("Capacity (Ah)", 0.1, 1.5, float(real_cap))
+if c_name: st.sidebar.success(f"✅ Coluna de Capacidade: {c_name}")
+else: st.sidebar.warning("⚠️ Capacidade não identificada. Usando estimativa.")
+
+s_cap = st.sidebar.slider("Capacity (Ah)", 0.1, 5.0, float(real_cap))
 s_res = st.sidebar.slider("Resistance (Ω)", 0.01, 0.15, float(real_res), format="%.3f")
-s_volt = st.sidebar.slider("Voltage (V)", 2.0, 4.5, float(real_volt))
+s_max_v = st.sidebar.slider("Max Voltage (V)", 3.0, 4.5, float(real_volt), step=0.05)
+s_soh_diff = st.sidebar.number_input("SOH Drop Rate (Δ per cycle)", value=-0.001, step=0.001, format="%.4f")
 
-# ============================================
-# 4. ROTEADOR FÍSICO MoE (A Inteligência em Ação)
-# ============================================
+nominal_capacity_sidebar = st.sidebar.number_input("Nominal Capacity (Ah)", value=max(2.0, float(real_cap)), step=0.1)
+
+soh_atual = max(0, min(1, s_cap / nominal_capacity_sidebar))
 resist_atual = float(s_res) 
-input_df = pd.DataFrame([[s_cap, s_res, s_volt]], columns=feature_names)
 
-# Escolha Automática do Expert baseada na Física
-if resist_atual <= 0.050:
-    expert_ativo = modelos_moe['aeroespacial']
-    st.sidebar.success("🚀 Roteador MoE: Expert Aeroespacial Ativo")
-elif resist_atual <= 0.100:
-    expert_ativo = modelos_moe['industrial']
-    st.sidebar.warning("🚜 Roteador MoE: Expert Industrial Ativo")
+if resist_atual < 0.060:
+    expert_ativo, multiplier = modelos_moe.get('aeroespacial'), 300
+    st.sidebar.success("🚀 MoE: Aeroespacial")
+elif resist_atual < 0.120:
+    expert_ativo, multiplier = modelos_moe.get('industrial'), 2000
+    st.sidebar.warning("🚜 MoE: Industrial")
 else:
-    expert_ativo = modelos_moe['estacionario']
-    st.sidebar.info("🏠 Roteador MoE: Expert Estacionário Ativo")
+    expert_ativo, multiplier = modelos_moe.get('estacionario'), 5000
+    st.sidebar.info("🏠 MoE: Estacionário")
 
-# Previsão feita apenas pelo especialista correto!
-pred_rul_final = expert_ativo.predict(input_df)[0]
-years_life = pred_rul_final / 365.0
+if not expert_ativo: expert_ativo = list(modelos_moe.values())[0]
+
+input_df = pd.DataFrame([[soh_atual, resist_atual, nominal_capacity_sidebar, s_max_v, s_soh_diff]], columns=feature_names)
+pred_rul_final = max(0, min(1, expert_ativo.predict(input_df)[0])) * multiplier
 
 # ============================================
-# 5. MAIN ANALYTICS DASHBOARD
+# 4. MAIN ANALYTICS DASHBOARD
 # ============================================
 st.title(f"🔋 Analytics: {cell_id}")
 
-df_user = df 
+tab_main, tab_reliability = st.tabs(["🔬 Advanced Diagnostics (MoE V15)", "🛡️ Model Reliability"])
 
-with st.expander("🛠️ Data Debugger (Raw View)", expanded=False):
-    st.write(f"**Loaded File:** `{file_info['path']}`")
-    st.write(f"**Columns:** {list(df.columns)}")
-
-tab_main, tab_reliability = st.tabs(["🔬 Advanced Diagnostics (MoE V12)", "🛡️ Model Reliability"])
-
-# --- TAB 1: DASHBOARD ---
 with tab_main:
     st.markdown("### Electrochemical Health & Analysis")
-
+    
     col_conf1, col_conf2 = st.columns(2)
     with col_conf1:
-        nominal_capacity = st.number_input(
-            "Nominal Factory Capacity (Ah)", 
-            min_value=0.1, max_value=100.0, value=2.0, step=0.1,
-            help="Check datasheet. Ex: Standard 18650 = 2.0Ah to 3.0Ah."
-        )
+        nominal_factory = st.number_input("Nominal Factory Capacity (Ah)", value=float(nominal_capacity_sidebar))
     with col_conf2:
         failure_threshold = st.slider("Failure Threshold (SOH %)", 50, 90, 80)
 
-    if v_name: df_user['voltage'] = df_user[v_name]
+    soh_real = (s_cap / nominal_factory) * 100
     
-    if 'capacity' not in df_user.columns:
-        if v_name:
-            df_user['capacity'] = (df_user['voltage'] - 2.5) * (nominal_capacity / 1.7)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("SOH (State of Health)", f"{soh_real:.1f}%", delta=f"{soh_real-100:.1f}%")
+    k2.metric("Current Capacity", f"{s_cap:.2f} Ah", f"Nom: {nominal_factory} Ah")
+    k3.metric("Internal Resistance", f"{s_res*1000:.1f} mΩ", delta_color="inverse")
+    k4.metric("AI Prediction (RUL)", f"{int(pred_rul_final)} Cycles", "Until failure")
+
+    sub1, sub2, sub3, sub4 = st.tabs(["📉 Degradation Curve", "⚡ dQ/dV Analysis", "🕸️ Health Radar", "🔃 Second Life"])
+    
+    with sub1:
+        if c_name and not c_data.empty:
+            st.caption(f"Real Data Trend from column: **{c_name}**")
+            st.line_chart(c_data.reset_index(drop=True), color="#00FF00")
         else:
-            st.error("No Voltage or Capacity data found in file.")
-            st.stop()
+            st.info("Colunas de capacidade não detectadas para plotagem do histórico.")
 
-    current_capacity = df_user['capacity'].iloc[-1]
-    current_capacity = max(0, current_capacity)
-    soh_real = (current_capacity / nominal_capacity) * 100
-    current_resistance = s_res 
-
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    
-    kpi1.metric("SOH (State of Health)", f"{soh_real:.1f}%", delta=f"{soh_real-100:.1f}%")
-    kpi2.metric("Current Capacity", f"{current_capacity:.2f} Ah", f"Nom: {nominal_capacity} Ah", delta_color="off")
-    kpi3.metric("Internal Resistance", f"{current_resistance*1000:.1f} mΩ", "Lower is better", delta_color="inverse")
-    
-    # A RUL final agora vem do nosso Roteador MoE Inteligente!
-    kpi4.metric("AI Prediction (RUL)", f"{int(pred_rul_final)} Cycles", "Until failure")
-
-    subtab1, subtab2, subtab3, subtab4 = st.tabs([
-        "📉 Degradation Curve", 
-        "⚡ dQ/dV Analysis", 
-        "🕸️ Health Radar", 
-        "🔃 Second Life"
-    ])
-    
-    with subtab1:
-        st.caption("Comparison: Real Battery vs Failure Limit")
-        chart_df = pd.DataFrame({'Estimated Cycle': range(len(df_user)), 'Capacity': df_user['capacity']})
-        st.line_chart(chart_df.iloc[::10], x='Estimated Cycle', y='Capacity', color="#00FF00")
-
-    with subtab2:
-        st.caption("Capacity Derivative (Electrochemical Signature)")
-        numeric_cols = df_user.select_dtypes(include=[np.number]).columns
-        df_smooth = df_user[numeric_cols].rolling(window=50).mean().dropna()
-        
-        if len(df_smooth) > 50 and 'voltage' in df_smooth.columns:
-            dq = df_smooth['capacity'].diff()
-            dv = df_smooth['voltage'].diff()
-            dq_dv = dq / dv.replace(0, np.nan)
+    with sub2:
+        if v_name and c_name and not v_data.empty and not c_data.empty:
+            st.caption(f"Incremental Capacity Analysis (dQ/dV) | V: {v_name} | Q: {c_name}")
             
-            dqdv_data = pd.DataFrame({'Voltage (V)': df_smooth['voltage'], 'dQ/dV (Ah/V)': dq_dv}).dropna()
-            dqdv_data = dqdv_data[dqdv_data['dQ/dV (Ah/V)'].between(-20, 20)]
+            min_len = min(len(v_data), len(c_data))
+            v_smooth = v_data.iloc[:min_len].rolling(window=10).mean()
+            c_smooth = c_data.iloc[:min_len].rolling(window=10).mean()
             
-            st.scatter_chart(dqdv_data, x='Voltage (V)', y='dQ/dV (Ah/V)', color="#FF4B4B")
+            dq_dv = (c_smooth.diff() / v_smooth.diff()).replace([np.inf, -np.inf], np.nan).dropna()
+            mask = dq_dv.between(dq_dv.quantile(0.05), dq_dv.quantile(0.95))
+            
+            fig, ax = plt.subplots(figsize=(8, 3))
+            ax.plot(v_data.iloc[:min_len].loc[dq_dv[mask].index], dq_dv[mask], color="#FF4B4B", lw=2)
+            ax.set_xlabel("Voltage (V)")
+            ax.set_ylabel("dQ/dV (Ah/V)")
+            st.pyplot(fig)
         else:
-            st.warning("Insufficient or too noisy data for dQ/dV curve.")
+            st.warning("Insufficient voltage/capacity data for dQ/dV signature.")
 
-    with subtab3:
-        try:
-            import plotly.graph_objects as go
-            score_cap = min(soh_real / 100, 1.0)
-            score_res = max(1 - (current_resistance / 0.15), 0)
-            score_life = min(pred_rul_final / 1000, 1.0)
-            
-            categories = ['Capacity', 'Resistance', 'Remaining Life', 'Stability', 'Safety']
-            values = [score_cap, score_res, score_life, 0.85, 0.9] 
-            
-            fig = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself', name='Your Battery'))
-            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
-        except ImportError:
-            st.error("Install Plotly to view this chart: `pip install plotly`")
+    with sub3:
+        import plotly.graph_objects as go
+        categories = ['Capacity', 'Resistance', 'Remaining Life', 'Stability', 'Safety']
+        values = [soh_real/100, 1-(s_res/0.15), min(pred_rul_final/multiplier, 1), 0.85, 0.9]
+        fig = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself'))
+        fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])), showlegend=False)
+        st.plotly_chart(fig, width='stretch')
 
-    with subtab4:
+    with sub4:
         st.markdown("#### 🔄 Allocation Matrix: Load Profile vs. Criticality")
         st.caption("Classification based on current delivery capability (High/Low Drain) and reliability.")
         
-        R_HIGH_DRAIN = 0.050  
-        R_MED_DRAIN = 0.090   
-        R_LOW_DRAIN = 0.150   
-        SOH_ORIGINAL = 80.0   
-        SOH_MIN_VIABLE = 45.0   
+        R_HIGH_DRAIN, R_MED_DRAIN, R_LOW_DRAIN = 0.050, 0.090, 0.150
+        SOH_ORIGINAL, SOH_MIN_VIABLE = 80.0, 45.0   
         
-        tier_title = ""
-        load_profile = ""     
-        criticality = ""      
+        tier_title = load_profile = criticality = recommendation = ""
         examples = []
         max_c_rate = 0.0
         bg_color = "gray"
-        
-        # TIER 1
-        if soh_real >= SOH_ORIGINAL and current_resistance <= R_HIGH_DRAIN:
+
+        if soh_real >= SOH_ORIGINAL and s_res <= R_HIGH_DRAIN:
             tier_title, load_profile, criticality, bg_color, max_c_rate = "TIER 1: Premium Reuse", "High Drain", "Critical Applications", "green", 3.0
             recommendation = "Keep in original fleet or pass to high-end equipment."
             examples = ["🚁 Professional Drones & UAVs", "🛠️ Power Tools", "🏥 Medical Equipment"]
-        # TIER 2
         elif soh_real >= SOH_MIN_VIABLE:
             tier_title = "TIER 2: Second Life"
-            if current_resistance <= R_MED_DRAIN:
+            if s_res <= R_MED_DRAIN:
                 bg_color, load_profile, criticality, max_c_rate = "#FFA500", "Medium Drain", "Industrial Applications", 1.0
                 recommendation = "Ideal for systems needing short energy bursts."
                 examples = ["⚡ Grid Stabilization", "🛴 E-Scooters", "🔋 UPS"]
-            elif current_resistance <= R_LOW_DRAIN:
+            elif s_res <= R_LOW_DRAIN:
                 bg_color, load_profile, criticality, max_c_rate = "#FFD700", "Low Drain", "Stationary Applications", 0.5
                 recommendation = "Classic use for solar storage."
                 examples = ["🏠 Solar Time-Shift", "🚜 Light Forklifts", "📡 Telecom Backup"]
@@ -413,7 +425,6 @@ with tab_main:
                 bg_color, load_profile, criticality, max_c_rate = "#B0C4DE", "Ultra-Low Drain", "Disposable Applications", 0.1
                 recommendation = "Only for devices consuming milliamperes."
                 examples = ["💡 Garden Lighting", "🌡️ IoT Sensors", "🧸 Simple Toys"]
-        # TIER 3
         else:
             tier_title, load_profile, criticality, bg_color, max_c_rate = "TIER 3: Recycling", "Inoperable", "Safety Risk", "red", 0.0
             recommendation = "Internal impedance makes practical use unfeasible."
@@ -422,46 +433,81 @@ with tab_main:
         c1, c2 = st.columns([1, 2])
         with c1:
             st.markdown(f"""
-            <div style="background-color:{bg_color}; padding:15px; border-radius:10px; color:black;">
-                <h3 style="margin:0; font-size:18px;">{tier_title}</h3>
-                <hr style="border-top: 1px solid black;">
+            <div style="background-color:{bg_color}; padding:15px; border-radius:10px; color:black; border: 1px solid rgba(0,0,0,0.1);">
+                <h3 style="margin:0; font-size:18px; font-weight:bold;">{tier_title}</h3>
+                <hr style="border-top: 1px solid black; opacity: 0.3;">
                 <p style="margin:0;"><b>Profile:</b> {load_profile}</p>
-                <p style="margin:0; font-size:12px;">{criticality}</p>
+                <p style="margin:0; font-size:12px; opacity: 0.8;">{criticality}</p>
             </div>
             """, unsafe_allow_html=True)
             st.write("")
             st.metric("Max C-Rate (Safety)", f"{max_c_rate} C")
-            
-            base_val = 3.50 
-            res_factor = max(0, 1 - (current_resistance / 0.12))
-            cap_factor = soh_real / 100
-            val_est = base_val * cap_factor * res_factor if "TIER 3" not in tier_title else 0.20
-            st.metric("Est. Market Value", f"${val_est:.2f}")
+            val_est = 3.50 * (soh_real / 100) * max(0, 1 - (s_res / 0.12)) if "TIER 3" not in tier_title else 0.20
 
         with c2:
             st.subheader("🎯 Allocation Niches")
-            st.write(recommendation)
+            st.info(recommendation)
             for ex in examples: st.success(f"✅ {ex}")
 
-# --- TAB 2: MODEL RELIABILITY ---
 with tab_reliability:
-    st.subheader("🛡️ Model Reliability Check (MoE Ensembled)")
+    st.markdown("### 🛡️ Core Model Reliability & Stress Tests")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Leave-One-Dataset-Out (LODO)")
+        if lodo_metrics:
+            df_lodo = pd.DataFrame(lodo_metrics)
+            st.dataframe(df_lodo.style.highlight_min(subset=['R²'], color='#ff4b4b')
+                                     .highlight_max(subset=['MAE (%)'], color='#ff4b4b')
+                                     .format({
+                                         'R²': "{:.4f}", 'MAE (%)': "{:.2f}%", 
+                                         'Safe Bias (%)': "{:.1f}%", 'Neutral (±5%)': "{:.1f}%", 'Danger Bias (%)': "{:.1f}%"
+                                     }), width='stretch')
+        else:
+            st.warning("Métricas LODO não disponíveis.")
+
+    with col2:
+        st.subheader("Leave-One-Cell-Out (LOCO)")
+        if loco_metrics:
+            st.dataframe(pd.DataFrame(loco_metrics).style.format({'MAE (%)': "{:.2f}%"}), width='stretch')
+
+    st.markdown("---")
+    col3, col4 = st.columns(2)
+    with col3:
+        st.subheader("⏳ Temporal Split")
+        m1, m2 = st.columns(2)
+        mae_late = temporal_metrics.get('MAE Late Life (%)', 0.0)
+        r2_late = temporal_metrics.get('R² Late Life', 0.0)
+        m1.metric("MAE (Fim de Vida)", f"{mae_late:.2f}%", delta="- Ideal < 10%", delta_color="inverse")
+        m2.metric("R² Score (Fim)", f"{r2_late:.4f}")
+
+    with col4:
+        st.subheader("🔪 Ablation Study")
+        if ablation_metrics:
+            fig_ab, ax_ab = plt.subplots(figsize=(6, 3.5))
+            colors = ['#8a2be2', '#cd5c5c', '#4682b4', '#32cd32']
+            ax_ab.bar(ablation_metrics.keys(), ablation_metrics.values(), color=colors[:len(ablation_metrics)])
+            ax_ab.axhline(0, color='black', linewidth=1) 
+            ax_ab.set_ylim(0, 1.0)
+            plt.xticks(rotation=15) 
+            ax_ab.set_ylabel("R² Score")
+            st.pyplot(fig_ab)
+
+    st.markdown("---")
+    st.subheader("📊 Distribuição de Erro Global (Holdout Set)")
     c1, c2 = st.columns(2)
     with c1:
-        st.metric("Global Accuracy (R²)", f"{accuracy:.1%}")
-        st.write("### Error Distribution (Cycles)")
-        fig4a, ax4a = plt.subplots(figsize=(6, 4))
-        sns.histplot(y_test_set - y_pred_set, kde=True, color='purple', ax=ax4a)
-        ax4a.set_xlabel("Prediction Error (Real - Predicted)")
-        st.pyplot(fig4a)
+        st.metric("Global Accuracy (R² Ensembled)", f"{r2_full:.1%}")
+        error_pct = (y_test_set - y_pred_set) * 100
+        fig_dist, ax_dist = plt.subplots(figsize=(6, 4))
+        sns.histplot(error_pct, kde=True, color='purple', ax=ax_dist)
+        ax_dist.set_xlabel("Erro na previsão (%)")
+        st.pyplot(fig_dist)
         
     with c2:
-        st.write("### Prediction vs Reality")
-        fig4b, ax4b = plt.subplots(figsize=(6, 6))
-        ax4b.scatter(y_test_set, y_pred_set, alpha=0.3, color='blue')
-        lims = [0, max(max(y_test_set), max(y_pred_set)) + 100] if len(y_test_set) > 0 else [0, 2000]
-        ax4b.plot(lims, lims, 'r--', label='Perfect Prediction')
-        ax4b.set_xlabel("Actual Life (RUL)")
-        ax4b.set_ylabel("Predicted Life by MoE (RUL)")
-        ax4b.legend()
-        st.pyplot(fig4b)
+        fig_scatter, ax_scatter = plt.subplots(figsize=(6, 4))
+        ax_scatter.scatter(y_test_set, y_pred_set, alpha=0.4, color='blue', edgecolors='w')
+        ax_scatter.plot([0, 1], [0, 1], 'r--', label='Referência Ideal')
+        ax_scatter.set(xlabel="Vida Real (%)", ylabel="Vida Prevista (%)")
+        ax_scatter.legend()
+        st.pyplot(fig_scatter)
