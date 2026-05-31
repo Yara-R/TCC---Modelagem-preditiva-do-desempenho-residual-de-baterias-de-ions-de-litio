@@ -30,7 +30,7 @@ This project addresses these gaps through three contributions:
 ├── app.py                  # Streamlit dashboard (main entry point)
 ├── etl_pipeline.py         # ETL pipeline — dataset scanning and master index generation
 ├── configs/
-│   └── config.yaml         # External data source paths (edit before running)
+│   └── config.yaml         # External data source paths
 ├── dataloaders/            # Dataset-specific parsers (.csv and .mat)
 ├── requirements.txt        # Python dependencies (pip)
 ├── environment.yml         # Conda environment specification
