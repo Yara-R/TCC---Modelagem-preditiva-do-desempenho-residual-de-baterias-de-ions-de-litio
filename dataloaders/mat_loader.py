@@ -8,7 +8,19 @@ import scipy.io
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import scipy.io as sio
+import h5py
 
+def load_mat(filepath):
+    try:
+        return sio.loadmat(filepath)
+    except NotImplementedError:
+        # Arquivo é MAT v7.3 (HDF5)
+        data = {}
+        with h5py.File(filepath, 'r') as f:
+            for key in f.keys():
+                data[key] = np.array(f[key])
+        return data
 
 # ─────────────────────────────────────────────────────────────────
 # DIAGNÓSTICO — use quando não souber a estrutura real do arquivo
