@@ -142,6 +142,11 @@ class MatLoader:
                 if "dc" in fl or "ch" in fl:
                     return self._parse_oxford_exampledc(obj)
 
+        # OXFORD DATASET 1 (MATLAB v5): Mapeia chaves como 'Cell1', 'Cell2' de topo
+        oxford_cell_keys = [k for k in keys if k.lower().startswith("cell")]
+        if oxford_cell_keys:
+            return self._parse_oxford_v5_aggregated_cells(mat, oxford_cell_keys)
+
         # Fallback: tenta ler arrays de topo diretamente
         return self._parse_flat_arrays(mat, keys)
 
@@ -162,11 +167,8 @@ class MatLoader:
         return pd.DataFrame(rows)
 
     # ── OXFORD ExampleDC_C1.mat ──────────────────────────────────
-    # Estrutura: mat_struct com campos 'ch' e 'dc',
-    # cada um com subcampos t, v, q, T (e 'i' no dc)
 
     def _parse_oxford_exampledc(self, top_struct) -> pd.DataFrame:
-        # Pega o canal de descarga ('dc'), ou 'ch' se não tiver
         target = None
         for fname in top_struct._fieldnames:
             if fname.lower() == "dc":
@@ -195,6 +197,76 @@ class MatLoader:
 
         return self._align(data)
 
+    # ── OXFORD DATASET 1 (MATLAB v5 - Resiliência Baseada no HDF5) ──
+
+    def _parse_oxford_v5_aggregated_cells(self, mat: dict, cell_keys: list) -> pd.DataFrame:
+        """
+        Extrai de forma estável o histórico completo de ciclos guardado dentro
+        das chaves estruturadas 'Cell1'...'Cell8' do arquivo Matlab v5.
+        """
+        rows = []
+        for cell_name in sorted(cell_keys):
+            cell_struct = mat[cell_name]
+            if not hasattr(cell_struct, "_fieldnames"):
+                continue
+
+            # Varre os ciclos ('cyc0100', 'cyc0200', etc.) salvos como atributos da célula
+            for cyc_name in sorted(cell_struct._fieldnames):
+                if not cyc_name.lower().startswith("cyc"):
+                    continue
+                
+                cyc_struct = getattr(cell_struct, cyc_name)
+                if not hasattr(cyc_struct, "_fieldnames"):
+                    continue
+                
+                # Escolhe a subestrutura de descarga (ex: 'C1dc')
+                dc_key = self._pick_dc_key_scipy(cyc_struct._fieldnames)
+                if dc_key is None:
+                    continue
+                
+                dc_struct = getattr(cyc_struct, dc_key)
+                if not hasattr(dc_struct, "_fieldnames"):
+                    continue
+
+                # Extração segura e conversão numérica pura dos vetores temporais
+                q_arr = np.atleast_1d(getattr(dc_struct, "q", [])).flatten()
+                v_arr = np.atleast_1d(getattr(dc_struct, "v", [])).flatten()
+                t_arr = np.atleast_1d(getattr(dc_struct, "t", [])).flatten()
+                T_arr = np.atleast_1d(getattr(dc_struct, "T", [])).flatten()
+
+                if len(q_arr) == 0:
+                    continue
+
+                # Extrai a capacidade máxima obtida no ciclo (último ponto da descarga)
+                capacity = float(np.abs(q_arr[-1]) if q_arr[-1] != 0 else np.max(np.abs(q_arr)))
+                
+                rows.append({
+                    "cell_id":     cell_name,
+                    "cycle":       self._cycle_num(cyc_name),
+                    "capacity":    capacity,
+                    "voltage":     float(np.mean(v_arr)) if len(v_arr) > 0 else np.nan,
+                    "time":        float(t_arr[-1])      if len(t_arr) > 0 else np.nan,
+                    "temperature": float(np.mean(T_arr)) if len(T_arr) > 0 else np.nan,
+                })
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows).sort_values(["cell_id", "cycle"]).reset_index(drop=True)
+        print(f"✅ Oxford v5 Integrado: {len(df)} ciclos em {df['cell_id'].nunique()} células processadas.")
+        return df
+
+    @staticmethod
+    def _pick_dc_key_scipy(fieldnames: list) -> str | None:
+        """Localiza a subestrutura de descarga na lista de campos."""
+        for c in ("C1dc", "c1dc", "OCVdc", "ocvdc"):
+            if c in fieldnames: 
+                return c
+        for f in fieldnames:
+            if "dc" in f.lower(): 
+                return f
+        return None
+
     # ── FALLBACK: arrays planos no topo ──────────────────────────
 
     def _parse_flat_arrays(self, mat: dict, keys: list) -> pd.DataFrame:
@@ -211,7 +283,6 @@ class MatLoader:
         return self._align(data)
 
     # ── OXFORD PRINCIPAL — HDF5 (v7.3, 262 MB) ──────────────────
-    # Estrutura: /Cell1/cyc0100/C1dc/{t,v,q,T}
 
     def _load_hdf5(self, path: str) -> pd.DataFrame:
         try:
@@ -225,8 +296,6 @@ class MatLoader:
             with h5py.File(path, "r") as f:
                 cell_keys = self._hdf5_cell_keys(f)
                 if not cell_keys:
-                    print("⚠️  Nenhuma chave de célula encontrada. "
-                          "Use diagnose() para ver a estrutura real.")
                     return pd.DataFrame()
 
                 for cell_name in sorted(cell_keys):
@@ -258,11 +327,9 @@ class MatLoader:
 
         except Exception as e:
             print(f"❌ Erro HDF5 em {path}: {e}")
-            import traceback; traceback.print_exc()
             return pd.DataFrame()
 
         if not rows:
-            print("⚠️  Sem dados de descarga. Use diagnose() para verificar nomes dos grupos.")
             return pd.DataFrame()
 
         df = pd.DataFrame(rows).sort_values(["cell_id", "cycle"]).reset_index(drop=True)

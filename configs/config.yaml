@@ -7,6 +7,7 @@ data_paths:
   oxford: "./data/Oxford"
 
 column_mapping:
+
   voltage:
     - "v_measured"
     - "voltage_load"
@@ -16,6 +17,14 @@ column_mapping:
     - "v"
     - "tension"
     - "tensao"
+    - "voltage_charger"
+    - "c_vol"          # Forklift dataset
+    - "vbat"
+    - "terminal_voltage"
+    - "cell_voltage"
+    - "voltage_battery"
+    - "u"              # nomenclatura europeia
+
   capacity:
     - "discharge"
     - "q_measured"
@@ -25,16 +34,147 @@ column_mapping:
     - "cap"
     - "ah"
     - "q"
+    - "ma_h"           # Forklift / Multi-Stage (miliampere-hora)
+    - "capacity_ah"
+    - "charge_capacity"
+    - "discharge_capacity"
+    - "qcharge"
+    - "nominal_capacity"
+    - "capacity_calculated_ah"
+
   current:
-    - "c_cur"
+    - "c_cur"          # Forklift dataset
     - "current_load"
     - "i_meas"
     - "current"
     - "amp"
     - "corrente"
     - "i"
+    - "ibat"
+    - "current_charge"
+    - "current_discharge"
+    - "i_battery"
+
   time:
     - "run_time"
     - "time_s"
     - "time"
     - "t"
+    - "start_time"
+    - "elapsed_time"
+    - "step_time"
+    - "test_time"
+    - "datetime"
+    - "timestamp"
+    - "date_time"
+
+  temperature:
+    - "temperature"
+    - "temp"
+    - "t_battery"
+    - "temp_battery"
+    - "ambient_temperature"
+    - "temperature_measured"
+    - "battery_temperature"
+    - "cell_temperature"
+    - "t_cell"
+    - "temperatura"    # português
+    - "temp_c"
+    - "surface_temp"
+
+  cycle:
+    - "cycle"
+    - "cycle_number"
+    - "cycle_index"
+    - "cycle_count"
+    - "ciclo"          # português
+    - "n_cycle"
+    - "cycle_id"
+    - "charge_cycle"
+
+  soh:
+    - "soh"
+    - "state_of_health"
+    - "health"
+    - "capacity_retention"
+    - "soh_percent"
+    - "relative_capacity"
+    - "saude"          # português
+    - "degradation"
+
+  soc:
+    - "soc"
+    - "state_of_charge"
+    - "charge_level"
+    - "soc_percent"
+
+  resistance:
+    - "resistance"
+    - "internal_resistance"
+    - "re"
+    - "rct"
+    - "impedance"
+    - "r_int"
+    - "ohmic_resistance"
+    - "resistencia"    # português
+
+  rul:
+    - "rul"
+    - "remaining_useful_life"
+    - "remaining_life"
+    - "cycles_remaining"
+    - "rul_frac"
+    - "vida_util_restante"  # português
+
+  power:
+    - "power"
+    - "potencia"       # português
+    - "discharge_power"
+    - "charge_power"
+    - "p"
+    - "watt"
+    - "w"
+
+  energy:
+    - "energy"
+    - "energia"        # português
+    - "discharge_energy"
+    - "charge_energy"
+    - "wh"
+    - "kwh"
+    - "cumulative_energy"
+
+# column_mapping:
+#   voltage:
+#     - "v_measured"
+#     - "voltage_load"
+#     - "ecell_v"
+#     - "voltage"
+#     - "volt"
+#     - "v"
+#     - "tension"
+#     - "tensao"
+#     - "voltage_charger"
+#   capacity:
+#     - "discharge"
+#     - "q_measured"
+#     - "throughput"
+#     - "capacity"
+#     - "qdischarge"
+#     - "cap"
+#     - "ah"
+#     - "q"
+#   current:
+#     - "c_cur"
+#     - "current_load"
+#     - "i_meas"
+#     - "current"
+#     - "amp"
+#     - "corrente"
+#     - "i"
+#   time:
+#     - "run_time"
+#     - "time_s"
+#     - "time"
+#     - "t"
+#     - "start_time"

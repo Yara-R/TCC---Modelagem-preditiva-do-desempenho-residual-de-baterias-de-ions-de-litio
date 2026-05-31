@@ -44,9 +44,19 @@ def scan_directory(source_name, path_str):
         if "impedance" in name_lower:
             continue
             
+        # Build cell_id including subfolder(s) relative to root, so files
+        # nested inside subdirectories (e.g. Forklift/Ageing/data.csv) get
+        # a unique, human-readable ID like "forklift_Ageing_data".
+        relative_parts = p.relative_to(root).parts  # e.g. ('Ageing', 'data.csv')
+        if len(relative_parts) > 1:
+            # join all parent folder names + stem, skip the filename itself
+            cell_id = f"{source_name}_" + "_".join(list(relative_parts[:-1]) + [p.stem])
+        else:
+            cell_id = f"{source_name}_{p.stem}"
+
         entry = {
             "dataset_source": source_name,
-            "cell_id": f"{source_name}_{p.stem}",
+            "cell_id": cell_id,
             "path": str(p),
             "meta": "{}" 
         }
@@ -67,6 +77,6 @@ if __name__ == "__main__":
     else:
         expected_cols = ["dataset_source", "cell_id", "path", "meta"]
         df = df[expected_cols] 
-        output_file = "battery_index.csv"
+        output_file = "master_battery_index.csv"
         df.to_csv(output_file, index=False)
         print(f"\n✅ Success! Index saved to '{output_file}' with {len(df)} main files.")
